@@ -7,7 +7,6 @@
 
 // --- Configuration ---
 const REPORT_PATH = "/api/report"; // The endpoint path clients should POST to
-const PORT = 8000; // Port the server will listen on
 
 /**
  * Handles incoming HTTP requests.
@@ -122,24 +121,22 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
-// --- Server Startup ---
-console.log(`Crash Report Server starting...`);
-console.log(
-  `Listening for POST requests on http://localhost:${PORT}${REPORT_PATH}`,
-);
-console.log(`Using Deno KV for storage.`);
-console.log(
-  `  - To persist data, run with DENO_KV_PATH=./my_reports.kv or use Deno.openKv("./my_reports.kv")`,
-);
-console.log(
-  `  - Required permissions: --allow-net --allow-read --allow-write (or --allow-env=DENO_KV_PATH)`,
-);
-// Add --unstable if your Deno version still requires it for KV, though it's stable now.
-
 // Start the HTTP server
 Deno.serve({
-  port: PORT,
+  port: 0,
   onListen: ({ hostname, port }) => {
     console.log(`Server listening on http://${hostname}:${port}`);
+    // --- Server Startup ---
+    console.log(`Crash Report Server starting...`);
+    console.log(
+      `Listening for POST requests on http://localhost:${port}${REPORT_PATH}`,
+    );
+    console.log(`Using Deno KV for storage.`);
+    console.log(
+      `  - To persist data, run with DENO_KV_PATH=./my_reports.kv or use Deno.openKv("./my_reports.kv")`,
+    );
+    console.log(
+      `  - Required permissions: --allow-net --allow-read --allow-write (or --allow-env=DENO_KV_PATH)`,
+    );
   },
 }, handler);

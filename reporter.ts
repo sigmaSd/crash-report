@@ -1,27 +1,12 @@
-// Corrected: Import readAll from jsr:@std/io
-import { readAll } from "jsr:@std/io/read-all";
-// Corrected: No need to import TextDecoder, it's global.
+const CRASH_REPORT_BASE_URL = Deno.env.get("CRASH_REPORT_BASE_URL");
+const CRASH_REPORT_ENDPOINT = `${CRASH_REPORT_BASE_URL}/api/report`;
 
-// --- Configuration ---
-// Replace with your actual endpoint URL!
-const CRASH_REPORT_BASE_URL = "https://crash-report.deno.dev/";
-const CRASH_REPORT_ENDPOINT = `${CRASH_REPORT_BASE_URL}api/report`;
-// "https://your-crash-report-collector.example.com/api/report";
-// Or use a test service like https://webhook.site/
-
-async function main() {
+async function crashReport(reportContent: string) {
   console.error("--- Crash Reporter GUI Initializing ---");
-  console.error("--- Waiting for crash data on stdin ---");
 
-  let reportContent = "";
   try {
-    // 1. Read all data from standard input
-    const rawInput = await readAll(Deno.stdin);
-    // Use global TextDecoder directly
-    reportContent = new TextDecoder().decode(rawInput);
-
     if (reportContent.trim() === "") {
-      console.error("--- Received no input via stdin. Exiting. ---");
+      console.error("--- Received no input. Exiting. ---");
       Deno.exit(0);
     }
 
@@ -131,13 +116,13 @@ async function showConfirmationDialog(_report: string): Promise<boolean> {
             sendButton,
             "--cancel-label",
             cancelButton,
-            "--icon-name=dialog-warning",
+            "--icon=dialog-warning",
           ],
           stdin: "null",
           stdout: "null",
           stderr: "piped",
         });
-        successCondition = (output) => output.code === 0;
+        successCondition = (output) => output.success;
         break;
       }
       default: {
@@ -151,12 +136,12 @@ async function showConfirmationDialog(_report: string): Promise<boolean> {
     }
 
     // Execute the command
-    const output = await command.output();
+    const output = await command.output(); // async have issues with catching signals
 
     if (successCondition(output)) {
       return true; // User confirmed
     } else {
-      if (output.code !== 0 && !successCondition(output)) {
+      if (!output.success && !successCondition(output)) {
         // Use global TextDecoder
         const stderr = new TextDecoder().decode(output.stderr);
         if (stderr.trim()) {
@@ -225,5 +210,14 @@ async function sendReport(content: string) {
   }
 }
 
-// Run the main function
-main();
+// -------- Hook error events -----------
+addEventListener("error", async (event) => {
+  event.preventDefault();
+  await crashReport(event.message);
+  Deno.exit(1);
+});
+addEventListener("unhandledrejection", async (event) => {
+  event.preventDefault();
+  await crashReport(event.reason);
+  Deno.exit(1);
+});
