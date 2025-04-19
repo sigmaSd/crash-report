@@ -15,6 +15,9 @@
  * // Import this as the very first line in your main application script
  * import "jsr:@sigmasd/crash-report";
  *
+ * // Set the environment variable before running
+ * // export CRASH_REPORT_BASE_URL="https://your-report-server.com"
+ *
  * // Your application code starts here...
  * console.log("App starting");
  *
@@ -32,8 +35,9 @@
  *   other modules are imported.
  * - **ENVIRONMENT VARIABLE:** Requires the `CRASH_REPORT_BASE_URL` environment
  *   variable to be set to the base URL of your crash report receiving server
- *   (e.g., `https://my-crash-server.com`). The actual endpoint used will be
- *   `{CRASH_REPORT_BASE_URL}/api/report`.
+ *   (e.g., `https://my-crash-server.com`). The reporter will send reports to
+ *   `{CRASH_REPORT_BASE_URL}/api/report`. If this variable is not set, the
+ *   crash reporter will not activate.
  * - **PERMISSIONS:** This module requires the following Deno permissions:
  *   - `--allow-env=CRASH_REPORT_BASE_URL`: To read the server URL.
  *   - `--allow-net={hostname}`: To send the report via `fetch` to the specified host.
@@ -262,13 +266,16 @@ async function sendReport(content: string) {
 }
 
 // -------- Hook error events -----------
-addEventListener("error", async (event) => {
-  event.preventDefault();
-  await crashReport(event.message);
-  Deno.exit(1);
-});
-addEventListener("unhandledrejection", async (event) => {
-  event.preventDefault();
-  await crashReport(event.reason);
-  Deno.exit(1);
-});
+// If the crash reporting endpoint is configured, hook error events.
+if (CRASH_REPORT_BASE_URL) {
+  addEventListener("error", async (event) => {
+    event.preventDefault();
+    await crashReport(event.message);
+    Deno.exit(1);
+  });
+  addEventListener("unhandledrejection", async (event) => {
+    event.preventDefault();
+    await crashReport(event.reason);
+    Deno.exit(1);
+  });
+}
