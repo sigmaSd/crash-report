@@ -1,4 +1,4 @@
-import "../reporter.ts";
+import "jsr:@sigmasd/crash-report";
 
 const panic = () => {
   throw "hello world";

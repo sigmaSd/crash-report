@@ -1,10 +1,5 @@
 {
-  "deploy": {
-    "project": "1bfae64d-2c1e-4d51-a057-44986fefa36c",
-    "exclude": [
-      "**/node_modules"
-    ],
-    "include": [],
-    "entrypoint": "collecter.ts"
-  }
+  "name": "@sigmasd/crash-report",
+  "version": "0.1.0",
+  "exports": "./src/reporter.ts"
 }
