@@ -53,7 +53,8 @@
  *   process, the reporter will explicitly exit the Deno process using `Deno.exit(1)`.
  *   The `event.preventDefault()` calls attempt to stop Deno's default error logging.
  */
-const CRASH_REPORT_BASE_URL = Deno.env.get("CRASH_REPORT_BASE_URL");
+const CRASH_REPORT_BASE_URL = Deno.env.get("CRASH_REPORT_BASE_URL")
+  ?.replace(/\/$/, "");
 const CRASH_REPORT_ENDPOINT = `${CRASH_REPORT_BASE_URL}/api/report`;
 
 async function crashReport(reportContent: string) {
