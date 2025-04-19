@@ -16,6 +16,9 @@ endpoint.
 // Import this as the very first line in your main application script
 import "jsr:@sigmasd/crash-report";
 
+// Set the environment variable before running
+// export CRASH_REPORT_BASE_URL="https://your-report-server.com"
+
 // Your application code starts here...
 console.log("App starting");
 
