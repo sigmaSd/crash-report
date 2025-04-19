@@ -28,7 +28,7 @@
  * // Promise.reject("Something async went wrong!");
  * ```
  *
- * @remarks
+ * Notes:
  * - **IMPORT ORDER:** For maximum effectiveness, this module should be imported
  *   as the **very first line** of your application's entry point script. This
  *   ensures the error handlers are attached before any of your code runs or
