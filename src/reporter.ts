@@ -25,7 +25,7 @@
  * // throw new Error("Something went wrong!");
  *
  * // Example of an unhandled rejection:
- * // Promise.reject("Something async went wrong!");
+ * // Promise.reject(new Error("Something async went wrong!"));
  * ```
  *
  * Notes:
@@ -55,57 +55,140 @@
  */
 const CRASH_REPORT_BASE_URL = Deno.env.get("CRASH_REPORT_BASE_URL")
   ?.replace(/\/$/, "");
-const CRASH_REPORT_ENDPOINT = `${CRASH_REPORT_BASE_URL}/api/report`;
+const CRASH_REPORT_ENDPOINT = CRASH_REPORT_BASE_URL
+  ? `${CRASH_REPORT_BASE_URL}/api/report`
+  : null; // Make it nullable if base url isn't set
 
-async function crashReport(reportContent: string) {
-  console.error("--- Crash Reporter GUI Initializing ---");
+const textDecoder = new TextDecoder(); // Reuse decoder
+
+/**
+ * Serializes a value for inclusion in the crash report, paying special
+ * attention to Error objects to capture stack traces and messages.
+ * @param value The value to serialize (e.g., event.error, event.reason)
+ * @returns A representation suitable for JSON stringification.
+ */
+// deno-lint-ignore no-explicit-any
+function serializeValueForReport(value: unknown): any {
+  if (value instanceof Error) {
+    // Capture standard error properties
+    // deno-lint-ignore no-explicit-any
+    const errorObj: Record<string, any> = {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+    // Capture any additional own properties (enumerable or not), like 'code'
+    Object.getOwnPropertyNames(value).forEach((key) => {
+      if (key !== "name" && key !== "message" && key !== "stack") {
+        // deno-lint-ignore no-explicit-any
+        errorObj[key] = (value as any)[key];
+      }
+    });
+    return errorObj;
+  }
+
+  // Handle AggregateError specifically if available (Deno supports it)
+  if (
+    typeof AggregateError !== "undefined" && value instanceof AggregateError
+  ) {
+    // deno-lint-ignore no-explicit-any
+    const errorObj: Record<string, any> = {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+      // Recursively serialize the aggregated errors
+      errors: value.errors.map(serializeValueForReport),
+    };
+    Object.getOwnPropertyNames(value).forEach((key) => {
+      if (
+        key !== "name" && key !== "message" && key !== "stack" &&
+        key !== "errors"
+      ) {
+        // deno-lint-ignore no-explicit-any
+        errorObj[key] = (value as any)[key];
+      }
+    });
+    return errorObj;
+  }
+
+  // For non-Error values, return them as is. JSON.stringify will handle
+  // primitives, plain objects, and arrays. It might produce less useful
+  // output for other complex objects (like Promises, Maps, Sets), but
+  // this is generally acceptable for a crash report's context details.
+  return value;
+}
+
+async function crashReport(reportContentJsonString: string) {
+  console.error("--- Crash Reporter Initializing ---");
 
   try {
-    if (reportContent.trim() === "") {
-      console.error("--- Received no input. Exiting. ---");
-      Deno.exit(0);
+    if (
+      !reportContentJsonString || reportContentJsonString.trim() === "" ||
+      reportContentJsonString.trim() === "{}"
+    ) {
+      console.error("--- Received empty or minimal report data. Exiting. ---");
+      // Still exit with error code, as an error occurred to trigger this.
+      Deno.exit(1);
+      return;
     }
 
-    // 2. Display the received input in the console
-    console.error("\n--- Crash Report Received (scroll up if needed) ---");
-    console.error(reportContent);
-    console.error("--------------------------------------------------\n");
+    // reportContentJsonString is already formatted JSON (from the event handler)
+    console.error("\n--- Crash Report Details ---");
+    console.error(reportContentJsonString); // Log the pre-formatted JSON
+    console.error("---------------------------\n");
 
-    // 3. Show GUI confirmation dialog
-    const confirmed = await showConfirmationDialog(reportContent);
+    // Show GUI confirmation dialog
+    // Pass the JSON string; the dialog message is generic anyway.
+    const confirmed = await showConfirmationDialog(reportContentJsonString);
 
-    // 4. Handle the response
+    // Handle the response
     if (confirmed) {
       console.log("User accepted via GUI. Attempting to send report...");
-      await sendReport(reportContent);
+      await sendReport(reportContentJsonString); // Send the JSON string
     } else {
       console.log("User declined via GUI or dialog failed. Report not sent.");
     }
   } catch (err) {
-    console.error("\nError in crash reporter:", err);
+    console.error(
+      "\nError in crash reporter:",
+      err instanceof Error ? err.stack : err,
+    );
     // Optionally try to send the reporter's own error (without GUI confirmation)
-    try {
-      const internalErrorMsg =
-        `Crash Reporter Internal Error:\n${err}\n\nOriginal Report Data:\n${reportContent}`;
-      console.error("Attempting to send internal error report...");
-      await sendReport(internalErrorMsg);
-      console.error("Attempted to send internal error report.");
-    } catch (sendErr) {
-      console.error("Failed to send internal error report:", sendErr);
+    if (CRASH_REPORT_ENDPOINT) { // Check if sending is possible
+      try {
+        const internalErrorMsg = JSON.stringify({
+          type: "reporter_internal_error",
+          error: serializeValueForReport(err),
+          original_report_string: reportContentJsonString, // Include original data context
+        });
+        console.error("Attempting to send internal error report...");
+        // Send directly without confirmation
+        await sendReportInternal(internalErrorMsg);
+        console.error("Attempted to send internal error report.");
+      } catch (sendErr) {
+        console.error(
+          "Failed to send internal error report:",
+          sendErr instanceof Error ? sendErr.stack : sendErr,
+        );
+      }
     }
-    Deno.exit(1); // Exit with an error code
+    // Deno.exit(1) is called in the event handlers after crashReport finishes or fails
   }
+  // Note: Deno.exit(1) should be called in the event handlers *after* this function returns or throws.
 }
 
 /**
  * Shows a platform-specific GUI dialog asking for confirmation.
- * @param report The full report text (used for preview or context)
+ * @param _reportJsonString The full report JSON string (currently unused in dialog message)
  * @returns Promise<boolean> True if the user confirmed, false otherwise.
  */
-async function showConfirmationDialog(_report: string): Promise<boolean> {
+async function showConfirmationDialog(
+  _reportJsonString: string,
+): Promise<boolean> {
   const title = "Crash Report";
+  // Keep the message generic, as showing raw JSON isn't very user-friendly in a dialog.
   const message =
-    `An application may have crashed or encountered an error.\n\n(Full details printed in the console window where you launched the app).\n\nDo you want to send an anonymous crash report?`;
+    `An application error occurred.\n\nDetails have been printed to the console/terminal.\n\nDo you want to send an anonymous crash report to help improve the application?`;
   const sendButton = "Send Report";
   const cancelButton = "Don't Send";
 
@@ -119,41 +202,44 @@ async function showConfirmationDialog(_report: string): Promise<boolean> {
         const psCommand = `
                     Add-Type -AssemblyName System.Windows.Forms;
                     $result = [System.Windows.Forms.MessageBox]::Show('${
-          message.replace(/'/g, "''")
+          message.replace(/'/g, "''") // Basic escaping for PowerShell string
         }', '${
           title.replace(/'/g, "''")
         }', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button1);
-                    Write-Host $result;
+                    if ($result -eq 'Yes') { exit 0 } else { exit 1 }
                 `;
         command = new Deno.Command("powershell", {
           args: ["-NoProfile", "-Command", psCommand],
           stdin: "null",
-          stdout: "piped",
+          stdout: "piped", // Capture stdout to check if needed
           stderr: "piped",
         });
-        // Use global TextDecoder
-        successCondition = (output) =>
-          new TextDecoder().decode(output.stdout).trim() === "Yes";
+        // Success is exit code 0
+        successCondition = (output) => output.success;
         break;
       }
 
       case "darwin": // macOS
       {
         console.log("Using osascript for dialog...");
-        const appleScript = `display dialog "${
-          message.replace(/"/g, '\\"')
+        const appleScript = `display dialog "${message.replace(/"/g, '\\"') // Basic escaping for AppleScript string
         }" with title "${
           title.replace(/"/g, '\\"')
-        }" buttons {"${cancelButton}", "${sendButton}"} default button "${sendButton}" with icon caution \n return button returned of result`;
+        }" buttons {"${cancelButton}", "${sendButton}"} default button "${sendButton}" with icon caution
+                    set the button_pressed to button returned of the result
+                    if button_pressed is "${sendButton}" then
+                        return 0 -- Convention for success
+                    else
+                        error number -128 -- Standard cancel code
+                    end if`;
         command = new Deno.Command("osascript", {
           args: ["-e", appleScript],
           stdin: "null",
-          stdout: "piped",
+          stdout: "piped", // Capture stdout just in case
           stderr: "piped",
         });
-        // Use global TextDecoder
-        successCondition = (output) =>
-          new TextDecoder().decode(output.stdout).trim() === sendButton;
+        // Success is exit code 0 (osascript error -128 means user cancelled)
+        successCondition = (output) => output.success;
         break;
       }
 
@@ -173,11 +259,13 @@ async function showConfirmationDialog(_report: string): Promise<boolean> {
             "--cancel-label",
             cancelButton,
             "--icon=dialog-warning",
+            "--width=400", // Optional: set a width
           ],
           stdin: "null",
-          stdout: "null",
+          stdout: "null", // Zenity uses exit code for result
           stderr: "piped",
         });
+        // Success is exit code 0
         successCondition = (output) => output.success;
         break;
       }
@@ -185,53 +273,92 @@ async function showConfirmationDialog(_report: string): Promise<boolean> {
         console.warn(
           `Unsupported OS (${Deno.build.os}) for GUI dialog. Falling back to console prompt.`,
         );
-        // Requires --allow-sys=prompt if this fallback is hit
-        const answer = prompt("Send crash report? (yes/no):");
-        return answer?.toLowerCase().trim().startsWith("y") ?? false;
+        return confirm(`${message}\nSend report?`);
       }
     }
 
     // Execute the command
-    const output = await command.output(); // async have issues with catching signals
+    console.log("Waiting for user response in dialog...");
+    const output = await command.output(); // Use output() to wait and get result
 
     if (successCondition(output)) {
+      console.log("Dialog confirmed by user.");
       return true; // User confirmed
     } else {
-      if (!output.success && !successCondition(output)) {
-        // Use global TextDecoder
-        const stderr = new TextDecoder().decode(output.stderr);
-        if (stderr.trim()) {
+      const stderr = textDecoder.decode(output.stderr).trim();
+      // Check for specific cancel codes or messages if needed (e.g., osascript error -128)
+      if (!output.success || stderr) { // If failed or has stderr
+        if (stderr) {
           console.error(
-            `Dialog command failed with code ${output.code}:\n${stderr}`,
+            `Dialog command failed or was cancelled. Code: ${output.code}, Stderr: ${stderr}`,
           );
         } else {
-          console.log("Dialog cancelled by user or failed without stderr.");
+          console.log(
+            `Dialog command exited with code ${output.code} (likely cancelled by user).`,
+          );
         }
+      } else {
+        console.log("Dialog cancelled by user.");
       }
       return false; // User cancelled or command failed
     }
   } catch (err) {
     console.error("--------------------------------------------------");
-    console.error("FATAL: Failed to execute GUI dialog command.");
+    console.error("FATAL: Failed to display or execute GUI dialog command.");
     if (err instanceof Deno.errors.NotFound) {
       console.error(
         "=> The required dialog command (e.g., zenity, powershell, osascript) might not be installed or found in the system's PATH.",
       );
     } else {
-      console.error("=> Error details:", err);
+      console.error(
+        "=> Error details:",
+        err instanceof Error ? err.stack : err,
+      );
     }
     console.error("--------------------------------------------------");
-    console.error("Please report the crash manually if desired.");
+    console.error("Report will not be sent automatically.");
     return false; // Don't send if dialog failed
   }
 }
 
 /**
  * Sends the report to the configured endpoint.
- * @param content The report content string.
+ * @param contentJsonString The report content as a JSON string.
  */
-async function sendReport(content: string) {
+async function sendReport(contentJsonString: string) {
+  if (!CRASH_REPORT_ENDPOINT) {
+    console.error("CRASH_REPORT_BASE_URL not set, cannot send report.");
+    return;
+  }
+  await sendReportInternal(contentJsonString);
+}
+
+/**
+ * Internal function to actually send the report via fetch.
+ * Used by both normal reporting and internal error reporting.
+ * @param contentJsonString The report content as a JSON string.
+ */
+async function sendReportInternal(contentJsonString: string) {
+  if (!CRASH_REPORT_ENDPOINT) return; // Should not happen if called correctly, but safeguard
+
   console.log(`Sending report to: ${CRASH_REPORT_ENDPOINT}`);
+  // deno-lint-ignore no-explicit-any
+  let reportPayload: any;
+
+  try {
+    // Parse the incoming JSON string back into an object
+    reportPayload = JSON.parse(contentJsonString);
+  } catch (e) {
+    console.error(
+      "Internal Error: Failed to parse report content string before sending. Sending raw string.",
+      e,
+    );
+    // Fallback: Send the raw string if parsing fails
+    reportPayload = {
+      type: "parse_failure",
+      raw_report_string: contentJsonString,
+    };
+  }
 
   try {
     // Requires --allow-net=<hostname> or --allow-net
@@ -239,13 +366,19 @@ async function sendReport(content: string) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "User-Agent": `DenoCrashReporter/${Deno.version.deno}`,
       },
-      body: JSON.stringify({
+      body: JSON.stringify({ // Structure the final payload for the server
         timestamp: new Date().toISOString(),
-        report: content,
+        // Embed the parsed report object (or fallback) here
+        report: reportPayload,
         reporterInfo: {
           os: Deno.build.os,
           arch: Deno.build.arch,
+          denoVersion: Deno.version.deno,
+          // Consider adding app name/version if available via env vars
+          // appName: Deno.env.get("APP_NAME"),
+          // appVersion: Deno.env.get("APP_VERSION"),
         },
       }),
     });
@@ -258,25 +391,76 @@ async function sendReport(content: string) {
       );
       try {
         const errorBody = await response.text();
-        console.error("Server response body:", errorBody);
+        if (errorBody) console.error("Server response body:", errorBody);
       } catch (_) { /* Ignore error reading body */ }
     }
   } catch (error) {
-    console.error("Network or fetch error:", error);
+    console.error(
+      "Network or fetch error:",
+      error instanceof Error ? error.stack : error,
+    );
   }
 }
 
 // -------- Hook error events -----------
 // If the crash reporting endpoint is configured, hook error events.
-if (CRASH_REPORT_BASE_URL) {
-  addEventListener("error", async (event) => {
-    event.preventDefault();
-    await crashReport(event.message);
-    Deno.exit(1);
+if (CRASH_REPORT_ENDPOINT) {
+  console.log(
+    `Crash reporter activated. Reports will be sent to: ${CRASH_REPORT_BASE_URL}`,
+  );
+
+  self.addEventListener("error", async (event: ErrorEvent) => {
+    console.error("\n--- Uncaught Error Captured ---");
+    event.preventDefault(); // Prevent Deno's default logging
+
+    // Construct the report data object first
+    const reportData = {
+      type: "error", // Add type for context
+      message: event.message,
+      filename: event.filename,
+      lineno: event.lineno,
+      colno: event.colno,
+      error: serializeValueForReport(event.error), // Use the helper
+    };
+
+    // Stringify the structured data
+    const reportJson = JSON.stringify(reportData, null, 2); // Pretty print for console log
+
+    try {
+      await crashReport(reportJson);
+    } finally {
+      // Ensure exit happens even if crashReport itself throws an error
+      console.error("Exiting due to uncaught error.");
+      Deno.exit(1);
+    }
   });
-  addEventListener("unhandledrejection", async (event) => {
-    event.preventDefault();
-    await crashReport(event.reason);
-    Deno.exit(1);
-  });
+
+  self.addEventListener(
+    "unhandledrejection",
+    async (event: PromiseRejectionEvent) => {
+      console.error("\n--- Unhandled Promise Rejection Captured ---");
+      event.preventDefault(); // Prevent Deno's default logging
+
+      // Construct the report data object first
+      const reportData = {
+        type: "unhandledrejection", // Add type for context
+        reason: serializeValueForReport(event.reason), // Use the helper
+      };
+
+      // Stringify the structured data
+      const reportJson = JSON.stringify(reportData, null, 2);
+
+      try {
+        await crashReport(reportJson);
+      } finally {
+        // Ensure exit happens even if crashReport itself throws an error
+        console.error("Exiting due to unhandled promise rejection.");
+        Deno.exit(1);
+      }
+    },
+  );
+} else {
+  console.warn(
+    "Crash reporter inactive: CRASH_REPORT_BASE_URL environment variable not set.",
+  );
 }
