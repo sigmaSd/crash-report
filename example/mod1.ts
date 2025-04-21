@@ -1,4 +1,4 @@
-import "jsr:@sigmasd/crash-report";
+import "jsr:@sigmasd/crash-report/hook";
 
 const panic = () => {
   throw "hello world";

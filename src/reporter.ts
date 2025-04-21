@@ -14,7 +14,7 @@
  * **Key Exports:**
  * - `CRASH_REPORT_BASE_URL`: The base URL read from the environment variable.
  * - `CRASH_REPORT_ENDPOINT`: The full URL endpoint (`/api/report` appended) where reports are sent.
- * - `crashReport(reportContentJsonString)`: Function to initiate the reporting process.
+ * - `crashReport(reportContent)`: Function to initiate the reporting process.
  *
  * @example
  * ```typescript
@@ -31,13 +31,15 @@
  *   } catch (error) {
  *     console.error("Caught critical error:", error);
  *     if (CRASH_REPORT_ENDPOINT) { // Check if reporting is configured
- *       const reportData = {
+ *       // You can now pass an object directly:
+ *       await crashReport({
  *         type: "manual_report",
  *         error: error,
- *         context: "From myCriticalFunction",
- *       };
- *       const reportJsonString = JSON.stringify(reportData, null, 2);
- *       await crashReport(reportJsonString); // Manually trigger reporting
+ *         context: "From myCriticalFunction"
+ *       });
+ *
+ *       // Or a simple message:
+ *       // await crashReport("Application crashed during initialization");
  *     }
  *     // Decide whether to exit or continue after manual report attempt
  *     Deno.exit(1);
@@ -73,13 +75,47 @@ export const CRASH_REPORT_ENDPOINT: string | null = CRASH_REPORT_BASE_URL
 
 const textDecoder = new TextDecoder(); // Reuse decoder
 
-export async function crashReport(reportContentJsonString: string) {
+/**
+ * Submits a crash report after showing a confirmation dialog to the user.
+ *
+ * @param reportContent The report data to send - can be:
+ *   - An object: Will be sent as structured data
+ *   - A string: Will be sent as a message
+ *   - Other types will be converted appropriately
+ * @returns A Promise that resolves when the reporting process is complete
+ */
+export async function crashReport(
+  reportContent: unknown,
+): Promise<void> {
   console.error("--- Crash Reporter Initializing ---");
 
   try {
+    // Convert to string for logging purposes
+    let reportContentString: string;
+
+    if (typeof reportContent === "string") {
+      reportContentString = reportContent;
+    } else if (reportContent === undefined || reportContent === null) {
+      reportContentString = "Empty report (undefined or null)";
+    } else if (typeof reportContent === "object") {
+      try {
+        // Format JSON with indentation for better readability in logs
+        reportContentString = JSON.stringify(reportContent, null, 2);
+      } catch (err) {
+        // Handle circular references or other serialization issues
+        reportContentString = `Error serializing report object: ${
+          err instanceof Error ? err.message : String(err)
+        }
+Original object type: ${typeof reportContent}`;
+      }
+    } else {
+      // Handle primitive values
+      reportContentString = String(reportContent);
+    }
+
     if (
-      !reportContentJsonString || reportContentJsonString.trim() === "" ||
-      reportContentJsonString.trim() === "{}"
+      !reportContentString || reportContentString.trim() === "" ||
+      reportContentString.trim() === "{}"
     ) {
       console.error("--- Received empty or minimal report data. Exiting. ---");
       // Still exit with error code, as an error occurred to trigger this.
@@ -87,19 +123,18 @@ export async function crashReport(reportContentJsonString: string) {
       return;
     }
 
-    // reportContentJsonString is already formatted JSON (from the event handler)
+    // Log the report content
     console.error("\n--- Crash Report Details ---");
-    console.error(reportContentJsonString); // Log the pre-formatted JSON
+    console.error(reportContentString);
     console.error("---------------------------\n");
 
     // Show GUI confirmation dialog
-    // Pass the JSON string; the dialog message is generic anyway.
-    const confirmed = await showConfirmationDialog(reportContentJsonString);
+    const confirmed = await showConfirmationDialog();
 
     // Handle the response
     if (confirmed) {
       console.log("User accepted via GUI. Attempting to send report...");
-      await sendReport(reportContentJsonString); // Send the JSON string
+      await sendReport(reportContent); // Pass the original content
     } else {
       console.log("User declined via GUI or dialog failed. Report not sent.");
     }
@@ -111,14 +146,14 @@ export async function crashReport(reportContentJsonString: string) {
     // Optionally try to send the reporter's own error (without GUI confirmation)
     if (CRASH_REPORT_ENDPOINT) { // Check if sending is possible
       try {
-        const internalErrorMsg = JSON.stringify({
+        const internalErrorReport = {
           type: "reporter_internal_error",
           error: serializeValueForReport(err),
-          original_report_string: reportContentJsonString, // Include original data context
-        });
+          original_report: reportContent,
+        };
         console.error("Attempting to send internal error report...");
         // Send directly without confirmation
-        await sendReportInternal(internalErrorMsg);
+        await sendReportInternal(internalErrorReport);
         console.error("Attempted to send internal error report.");
       } catch (sendErr) {
         console.error(
@@ -134,14 +169,11 @@ export async function crashReport(reportContentJsonString: string) {
 
 /**
  * Shows a platform-specific GUI dialog asking for confirmation.
- * @param _reportJsonString The full report JSON string (currently unused in dialog message)
  * @returns Promise<boolean> True if the user confirmed, false otherwise.
  */
-async function showConfirmationDialog(
-  _reportJsonString: string,
-): Promise<boolean> {
+async function showConfirmationDialog(): Promise<boolean> {
   const title = "Crash Report";
-  // Keep the message generic, as showing raw JSON isn't very user-friendly in a dialog.
+  // Keep the message generic, as showing raw details isn't very user-friendly in a dialog.
   const message =
     `An application error occurred.\n\nDetails have been printed to the console/terminal.\n\nDo you want to send an anonymous crash report to help improve the application?`;
   const sendButton = "Send Report";
@@ -278,41 +310,35 @@ async function showConfirmationDialog(
 
 /**
  * Sends the report to the configured endpoint.
- * @param contentJsonString The report content as a JSON string.
+ * @param reportContent The report content (object or string).
  */
-async function sendReport(contentJsonString: string) {
+async function sendReport(reportContent: unknown) {
   if (!CRASH_REPORT_ENDPOINT) {
     console.error("CRASH_REPORT_BASE_URL not set, cannot send report.");
     return;
   }
-  await sendReportInternal(contentJsonString);
+  await sendReportInternal(reportContent);
 }
 
 /**
  * Internal function to actually send the report via fetch.
  * Used by both normal reporting and internal error reporting.
- * @param contentJsonString The report content as a JSON string.
+ * @param reportContent The report content (object or string).
  */
-async function sendReportInternal(contentJsonString: string) {
+async function sendReportInternal(reportContent: unknown) {
   if (!CRASH_REPORT_ENDPOINT) return; // Should not happen if called correctly, but safeguard
 
   console.log(`Sending report to: ${CRASH_REPORT_ENDPOINT}`);
-  // deno-lint-ignore no-explicit-any
-  let reportPayload: any;
 
-  try {
-    // Parse the incoming JSON string back into an object
-    reportPayload = JSON.parse(contentJsonString);
-  } catch (e) {
-    console.error(
-      "Internal Error: Failed to parse report content string before sending. Sending raw string.",
-      e,
-    );
-    // Fallback: Send the raw string if parsing fails
-    reportPayload = {
-      type: "parse_failure",
-      raw_report_string: contentJsonString,
-    };
+  // Prepare the report payload based on the type of input
+  let reportPayload: unknown;
+
+  if (typeof reportContent === "string") {
+    // Simple approach: wrap strings as messages
+    reportPayload = { message: reportContent };
+  } else {
+    // Already an object or other value, use directly
+    reportPayload = reportContent;
   }
 
   try {
@@ -325,7 +351,7 @@ async function sendReportInternal(contentJsonString: string) {
       },
       body: JSON.stringify({ // Structure the final payload for the server
         timestamp: new Date().toISOString(),
-        // Embed the parsed report object (or fallback) here
+        // Embed the processed report
         report: reportPayload,
         reporterInfo: {
           os: Deno.build.os,

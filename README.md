@@ -7,16 +7,17 @@ unhandled promise rejections (`unhandledrejection` event) in your Deno
 application.
 
 When an error is detected, it:
-1.  Prevents Deno's default error logging.
-2.  Prints detailed error information to the console.
-3.  Attempts to display a native GUI confirmation dialog (platform-specific:
-    Windows/PowerShell, macOS/osascript, Linux/zenity) asking the user if they
-    want to send a report. Falls back to a console prompt if GUI fails or
-    permissions are missing.
-4.  If confirmed by the user, sends a structured JSON crash report (including
-    error details, timestamp, and basic environment info) via a POST request
-    to a configured backend server endpoint.
-5.  Exits the Deno application with a non-zero status code (`Deno.exit(1)`).
+
+1. Prevents Deno's default error logging.
+2. Prints detailed error information to the console.
+3. Attempts to display a native GUI confirmation dialog (platform-specific:
+   Windows/PowerShell, macOS/osascript, Linux/zenity) asking the user if they
+   want to send a report. Falls back to a console prompt if GUI fails or
+   permissions are missing.
+4. If confirmed by the user, sends a structured JSON crash report (including
+   error details, timestamp, and basic environment info) via a POST request to a
+   configured backend server endpoint.
+5. Exits the Deno application with a non-zero status code (`Deno.exit(1)`).
 
 An optional, basic collector server using Deno KV is also included.
 
@@ -50,7 +51,7 @@ console.log("App starting...");
 
 **2. Configure the Server URL:**
 
-Set the `CRASH_REPORT_BASE_URL` environment variable *before* running your
+Set the `CRASH_REPORT_BASE_URL` environment variable _before_ running your
 application. This tells the reporter where to send the crash data.
 
 ```bash
@@ -89,7 +90,8 @@ deno run --allow-net --allow-read=. --allow-write=. --allow-env=DENO_KV_PATH src
 
 ## Report Payload Structure
 
-When a report is sent, the final JSON payload POSTed to the server looks like this:
+When a report is sent, the final JSON payload POSTed to the server looks like
+this:
 
 ```json
 {
@@ -115,7 +117,7 @@ When a report is sent, the final JSON payload POSTed to the server looks like th
   "reporterInfo": {
     "os": "linux", // e.g., "windows", "darwin", "linux"
     "arch": "x86_64",
-    "denoVersion": "1.38.0",
+    "denoVersion": "1.38.0"
     // Consider adding appName/appVersion via env vars if needed
   }
 }
@@ -123,15 +125,18 @@ When a report is sent, the final JSON payload POSTed to the server looks like th
 
 ## Manual Reporting (Advanced)
 
-While the automatic hook (`import "jsr:@sigmasd/crash-report/hook"`) is recommended
-for general use, you might want to manually trigger a crash report from within
-a specific `try...catch` block, perhaps for errors that you handle but still want
-to report.
+While the automatic hook (`import "jsr:@sigmasd/crash-report/hook"`) is
+recommended for general use, you might want to manually trigger a crash report
+from within a specific `try...catch` block, perhaps for errors that you handle
+but still want to report.
 
 **1. Import Necessary Functions:**
 
 ```typescript
-import { crashReport, CRASH_REPORT_ENDPOINT } from "jsr:@sigmasd/crash-report/reporter";
+import {
+  CRASH_REPORT_ENDPOINT,
+  crashReport,
+} from "jsr:@sigmasd/crash-report/reporter";
 ```
 
 **2. Implement the Reporting Logic:**
@@ -149,31 +154,28 @@ async function performCriticalTask() {
     // ... code that might throw a specific, handled error ...
     const result = await someRiskyOperation();
     if (!result.success) {
-        throw new Error(`Risky operation failed with code: ${result.errorCode}`);
+      throw new Error(`Risky operation failed with code: ${result.errorCode}`);
     }
     console.log("Critical task completed successfully.");
-
   } catch (error) {
     console.error("Caught an error during critical task:", error);
 
     // Decide to manually report this specific error
     console.log("Attempting to manually send a crash report...");
 
-    // 1. Prepare the report data object
-    const reportData = {
-      type: "manual_report", // Use a custom type
+    // Pass the error directly as an object (preferred way)
+    await crashReport({
+      type: "manual_report",
       error: error,
-      context: "Error occurred during performCriticalTask()", // Add custom context
-      // Add any other relevant data
-    };
+      context: "Error occurred during performCriticalTask()",
+      // Add any other relevant context data
+      timestamp: new Date().toISOString(),
+    });
 
-    // 2. Stringify the report data
-    const reportJsonString = JSON.stringify(reportData, null, 2); // Pretty print for console
+    // Alternatively, you can pass a simple string message:
+    // await crashReport(`Critical error in performCriticalTask: ${error.message}`);
 
-    // 3. Call crashReport (this shows the confirmation dialog)
-    await crashReport(reportJsonString);
-
-    // 4. Decide what to do next - crashReport does NOT exit automatically
+    // crashReport does NOT exit automatically
     console.error("Manual report process finished. Exiting application.");
     Deno.exit(1); // Or handle the error differently, e.g., retry, fallback
   }
@@ -185,33 +187,31 @@ performCriticalTask();
 
 **Important Considerations for Manual Reporting:**
 
-*   **Configuration/Permissions:** You *still* need the
-    `CRASH_REPORT_BASE_URL` environment variable set and the relevant
-    `--allow-env`, `--allow-net`, and `--allow-run` permissions granted.
-*   **Serialization:** Always use `serializeValueForReport(error)` when including
-    an `Error` object in your `reportData` before stringifying.
-*   **Process Exit:** Calling `crashReport` manually does **not** automatically
-    exit your application. You must explicitly call `Deno.exit(1)` or implement
-    other error handling logic within your `catch` block after the
-    `await crashReport(...)` call completes.
-*   **Use Case:** Manual reporting is best suited for non-fatal errors that you
-    catch and handle but still want visibility into via your reporting backend.
-    For truly *uncaught* errors, the automatic hook is preferred.
+- **Configuration/Permissions:** You _still_ need the `CRASH_REPORT_BASE_URL`
+  environment variable set.
+- **Flexible Inputs:** The `crashReport` function accepts either an object (with
+  structured data) or a string message. Objects will be sent as structured data,
+  while strings will be automatically wrapped in a message object.
+- **Process Exit:** Calling `crashReport` manually does **not** automatically
+  exit your application. You must explicitly call `Deno.exit(1)` or implement
+  other error handling logic within your `catch` block after the
+  `await crashReport(...)` call completes.
+- **Use Case:** Manual reporting is best suited for non-fatal errors that you
+  catch and handle but still want visibility into via your reporting backend.
+  For truly _uncaught_ errors, the automatic hook is preferred.
 
 ## Notes & Considerations
 
-*   **Import Order:** Always import `jsr:@sigmasd/crash-report/hook` as the
-    **very first** line of your application to ensure it catches errors from
-    the start.
-*   **Configuration:** The reporter is **inactive** if the
-    `CRASH_REPORT_BASE_URL` environment variable is not set. A warning will be
-    logged in this case.
-*   **GUI Dependencies:** On Linux, `zenity` must be installed for the graphical
-    dialog. Windows PowerShell and macOS `osascript` are typically built-in.
-*   **Exiting:** The hook ensures the application exits (`Deno.exit(1)`) after an
-    uncaught error is processed, regardless of whether the report was sent (due
-    to user declining or network errors).
-*   **Manual Reporting:** While the hook provides automatic handling, you can
-    trigger the reporting process manually by importing `crashReport` from
-    `jsr:@sigmasd/crash-report/reporter` (the main export). See the JSDoc in
-    `src/reporter.ts` for details, but this is less common.
+- **Import Order:** Always import `jsr:@sigmasd/crash-report/hook` as the **very
+  first** line of your application to ensure it catches errors from the start.
+- **Configuration:** The reporter is **inactive** if the `CRASH_REPORT_BASE_URL`
+  environment variable is not set. A warning will be logged in this case.
+- **GUI Dependencies:** On Linux, `zenity` must be installed for the graphical
+  dialog. Windows PowerShell and macOS `osascript` are typically built-in.
+- **Exiting:** The hook ensures the application exits (`Deno.exit(1)`) after an
+  uncaught error is processed, regardless of whether the report was sent (due to
+  user declining or network errors).
+- **Manual Reporting:** While the hook provides automatic handling, you can
+  trigger the reporting process manually by importing `crashReport` from
+  `jsr:@sigmasd/crash-report/reporter` (the main export). See the examples above
+  for details.
