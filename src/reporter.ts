@@ -1,124 +1,79 @@
 /**
- * # Crash Report
- * Crash Reporter Module for Deno Applications.
+ * @module crash-report/reporter
  *
- * This module hooks into global error handlers (`error` and `unhandledrejection`)
- * to capture uncaught exceptions and unhandled promise rejections. When an error
- * occurs, it attempts to display a native GUI dialog (platform-specific)
- * asking the user for confirmation before sending a crash report to a
- * configured backend endpoint.
+ * Core Crash Reporter Logic for Deno Applications.
  *
- * @module
+ * This module provides the central `crashReport` function responsible for
+ * handling the report submission process. It includes:
+ * - Displaying a native GUI dialog (platform-specific) to ask the user for
+ *   confirmation before sending a report.
+ * - Formatting the final payload including timestamp and environment details.
+ * - Sending the report payload as JSON to the configured backend endpoint via `fetch`.
+ * - Handling internal errors within the reporter itself.
+ *
+ * **Key Exports:**
+ * - `CRASH_REPORT_BASE_URL`: The base URL read from the environment variable.
+ * - `CRASH_REPORT_ENDPOINT`: The full URL endpoint (`/api/report` appended) where reports are sent.
+ * - `crashReport(reportContentJsonString)`: Function to initiate the reporting process.
  *
  * @example
  * ```typescript
- * // Import this as the very first line in your main application script
- * import "jsr:@sigmasd/crash-report";
+ * // This example shows *manual* triggering, usually you'd import the hook instead.
+ * import { crashReport, CRASH_REPORT_ENDPOINT } from "jsr:@sigmasd/crash-report/reporter";
  *
- * // Set the environment variable before running
+ * // Ensure CRASH_REPORT_BASE_URL is set in the environment
  * // export CRASH_REPORT_BASE_URL="https://your-report-server.com"
  *
- * // Your application code starts here...
- * console.log("App starting");
+ * async function myCriticalFunction() {
+ *   try {
+ *     // ... some code that might throw ...
+ *     throw new Error("A critical failure occurred!");
+ *   } catch (error) {
+ *     console.error("Caught critical error:", error);
+ *     if (CRASH_REPORT_ENDPOINT) { // Check if reporting is configured
+ *       const reportData = {
+ *         type: "manual_report",
+ *         error: error,
+ *         context: "From myCriticalFunction",
+ *       };
+ *       const reportJsonString = JSON.stringify(reportData, null, 2);
+ *       await crashReport(reportJsonString); // Manually trigger reporting
+ *     }
+ *     // Decide whether to exit or continue after manual report attempt
+ *     Deno.exit(1);
+ *   }
+ * }
  *
- * // Example of an error that would be caught:
- * // throw new Error("Something went wrong!");
+ * myCriticalFunction();
  *
- * // Example of an unhandled rejection:
- * // Promise.reject(new Error("Something async went wrong!"));
- * ```
- *
- * Notes:
- * - **IMPORT ORDER:** For maximum effectiveness, this module should be imported
- *   as the **very first line** of your application's entry point script. This
- *   ensures the error handlers are attached before any of your code runs or
- *   other modules are imported.
- * - **ENVIRONMENT VARIABLE:** Requires the `CRASH_REPORT_BASE_URL` environment
- *   variable to be set to the base URL of your crash report receiving server
- *   (e.g., `https://my-crash-server.com`). The reporter will send reports to
- *   `{CRASH_REPORT_BASE_URL}/api/report`. If this variable is not set, the
- *   crash reporter will not activate.
- * - **PERMISSIONS:** This module requires the following Deno permissions:
- *   - `--allow-env=CRASH_REPORT_BASE_URL`: To read the server URL.
- *   - `--allow-net={hostname}`: To send the report via `fetch` to the specified host.
- *     Replace `{hostname}` with the actual hostname from `CRASH_REPORT_BASE_URL`.
- *     Alternatively, `--allow-net` can be used, but is less secure.
- *   - `--allow-run=powershell,osascript,zenity`: To display native GUI confirmation
- *     dialogs on Windows, macOS, and Linux respectively. Grant permissions only for
- *     the commands relevant to the target platforms.
- * - **DEPENDENCIES:** On Linux, the `zenity` command-line tool must be installed
- *   for the GUI dialog to work. On Windows, PowerShell is expected. On macOS,
- *   `osascript` is used.
- * - **EXITING:** Upon capturing an error and completing (or attempting) the report
- *   process, the reporter will explicitly exit the Deno process using `Deno.exit(1)`.
- *   The `event.preventDefault()` calls attempt to stop Deno's default error logging.
+ * // NOTE: For automatic reporting of *uncaught* errors/rejections,
+ * // simply import the hook at the start of your app:
+ * // import "jsr:@sigmasd/crash-report/hook";
  */
-const CRASH_REPORT_BASE_URL = Deno.env.get("CRASH_REPORT_BASE_URL")
+
+import { serializeValueForReport } from "./utils.ts";
+
+/**
+ * The base URL for the crash report server, read from the
+ * `CRASH_REPORT_BASE_URL` environment variable. Trailing slashes are removed.
+ * Will be `undefined` if the environment variable is not set.
+ */
+export const CRASH_REPORT_BASE_URL: string | undefined = Deno.env.get(
+  "CRASH_REPORT_BASE_URL",
+)
   ?.replace(/\/$/, "");
-const CRASH_REPORT_ENDPOINT = CRASH_REPORT_BASE_URL
+/**
+ * The full endpoint URL where crash reports will be POSTed.
+ * Constructed by appending `/api/report` to `CRASH_REPORT_BASE_URL`.
+ * Will be `null` if `CRASH_REPORT_BASE_URL` is not set, effectively disabling reporting.
+ */
+export const CRASH_REPORT_ENDPOINT: string | null = CRASH_REPORT_BASE_URL
   ? `${CRASH_REPORT_BASE_URL}/api/report`
   : null; // Make it nullable if base url isn't set
 
 const textDecoder = new TextDecoder(); // Reuse decoder
 
-/**
- * Serializes a value for inclusion in the crash report, paying special
- * attention to Error objects to capture stack traces and messages.
- * @param value The value to serialize (e.g., event.error, event.reason)
- * @returns A representation suitable for JSON stringification.
- */
-// deno-lint-ignore no-explicit-any
-function serializeValueForReport(value: unknown): any {
-  if (value instanceof Error) {
-    // Capture standard error properties
-    // deno-lint-ignore no-explicit-any
-    const errorObj: Record<string, any> = {
-      name: value.name,
-      message: value.message,
-      stack: value.stack,
-    };
-    // Capture any additional own properties (enumerable or not), like 'code'
-    Object.getOwnPropertyNames(value).forEach((key) => {
-      if (key !== "name" && key !== "message" && key !== "stack") {
-        // deno-lint-ignore no-explicit-any
-        errorObj[key] = (value as any)[key];
-      }
-    });
-    return errorObj;
-  }
-
-  // Handle AggregateError specifically if available (Deno supports it)
-  if (
-    typeof AggregateError !== "undefined" && value instanceof AggregateError
-  ) {
-    // deno-lint-ignore no-explicit-any
-    const errorObj: Record<string, any> = {
-      name: value.name,
-      message: value.message,
-      stack: value.stack,
-      // Recursively serialize the aggregated errors
-      errors: value.errors.map(serializeValueForReport),
-    };
-    Object.getOwnPropertyNames(value).forEach((key) => {
-      if (
-        key !== "name" && key !== "message" && key !== "stack" &&
-        key !== "errors"
-      ) {
-        // deno-lint-ignore no-explicit-any
-        errorObj[key] = (value as any)[key];
-      }
-    });
-    return errorObj;
-  }
-
-  // For non-Error values, return them as is. JSON.stringify will handle
-  // primitives, plain objects, and arrays. It might produce less useful
-  // output for other complex objects (like Promises, Maps, Sets), but
-  // this is generally acceptable for a crash report's context details.
-  return value;
-}
-
-async function crashReport(reportContentJsonString: string) {
+export async function crashReport(reportContentJsonString: string) {
   console.error("--- Crash Reporter Initializing ---");
 
   try {
@@ -400,67 +355,4 @@ async function sendReportInternal(contentJsonString: string) {
       error instanceof Error ? error.stack : error,
     );
   }
-}
-
-// -------- Hook error events -----------
-// If the crash reporting endpoint is configured, hook error events.
-if (CRASH_REPORT_ENDPOINT) {
-  console.log(
-    `Crash reporter activated. Reports will be sent to: ${CRASH_REPORT_BASE_URL}`,
-  );
-
-  self.addEventListener("error", async (event: ErrorEvent) => {
-    console.error("\n--- Uncaught Error Captured ---");
-    event.preventDefault(); // Prevent Deno's default logging
-
-    // Construct the report data object first
-    const reportData = {
-      type: "error", // Add type for context
-      message: event.message,
-      filename: event.filename,
-      lineno: event.lineno,
-      colno: event.colno,
-      error: serializeValueForReport(event.error), // Use the helper
-    };
-
-    // Stringify the structured data
-    const reportJson = JSON.stringify(reportData, null, 2); // Pretty print for console log
-
-    try {
-      await crashReport(reportJson);
-    } finally {
-      // Ensure exit happens even if crashReport itself throws an error
-      console.error("Exiting due to uncaught error.");
-      Deno.exit(1);
-    }
-  });
-
-  self.addEventListener(
-    "unhandledrejection",
-    async (event: PromiseRejectionEvent) => {
-      console.error("\n--- Unhandled Promise Rejection Captured ---");
-      event.preventDefault(); // Prevent Deno's default logging
-
-      // Construct the report data object first
-      const reportData = {
-        type: "unhandledrejection", // Add type for context
-        reason: serializeValueForReport(event.reason), // Use the helper
-      };
-
-      // Stringify the structured data
-      const reportJson = JSON.stringify(reportData, null, 2);
-
-      try {
-        await crashReport(reportJson);
-      } finally {
-        // Ensure exit happens even if crashReport itself throws an error
-        console.error("Exiting due to unhandled promise rejection.");
-        Deno.exit(1);
-      }
-    },
-  );
-} else {
-  console.warn(
-    "Crash reporter inactive: CRASH_REPORT_BASE_URL environment variable not set.",
-  );
 }

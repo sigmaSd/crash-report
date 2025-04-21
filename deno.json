@@ -1,7 +1,10 @@
 {
   "name": "@sigmasd/crash-report",
   "version": "0.6.0",
-  "exports": "./src/reporter.ts",
+  "exports": {
+    ".": "./src/reporter.ts",
+    "./hook": "./src/hook.ts"
+  },
   "license": "MIT",
   "lock": false
 }
